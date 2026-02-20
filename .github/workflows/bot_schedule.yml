@@ -17,7 +17,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.11'  # [수정] 3.9 -> 3.11 (Numpy 2.x 호환성)
         
     - name: Install dependencies
       run: |
