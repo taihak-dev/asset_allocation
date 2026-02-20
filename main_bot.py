@@ -13,10 +13,24 @@ import pandas_datareader as pdr
 PORTFOLIO_FILE = 'portfolio.json'
 
 def load_portfolio():
+    """
+    포트폴리오 파일 로드 (파일이 없거나 깨졌으면 초기화)
+    """
+    default_portfolio = {'cash': config.INITIAL_CAPITAL_KRW, 'holdings': {}, 'last_rebal_date': ''}
+    
     if os.path.exists(PORTFOLIO_FILE):
-        with open(PORTFOLIO_FILE, 'r') as f:
-            return json.load(f)
-    return {'cash': config.INITIAL_CAPITAL_KRW, 'holdings': {}, 'last_rebal_date': ''}
+        try:
+            with open(PORTFOLIO_FILE, 'r') as f:
+                # 파일이 비어있는지 확인
+                content = f.read().strip()
+                if not content:
+                    return default_portfolio
+                return json.loads(content)
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"[WARN] Failed to load portfolio ({e}). Initializing new portfolio.")
+            return default_portfolio
+            
+    return default_portfolio
 
 def save_portfolio(portfolio):
     with open(PORTFOLIO_FILE, 'w') as f:
@@ -76,14 +90,8 @@ def run_bot():
     portfolio = load_portfolio()
     today_str = datetime.now().strftime('%Y-%m-%d')
     
-    # 1. 리밸런싱 체크 (매월 1일)
-    # 실제로는 '영업일' 체크가 필요하지만, GitHub Actions 스케줄러로 매일 돌리면서
-    # "오늘이 이번 달의 첫 실행인가?"를 체크하거나, 단순히 1일에 실행하도록 설정.
-    # 여기서는 "오늘이 1일이다"라고 가정하고 로직 작성 (스케줄러에서 제어)
-    
-    is_rebalancing_day = (datetime.now().day == 1) 
-    # 테스트를 위해 강제 True 가능
-    # is_rebalancing_day = True 
+    # [원상복구] 매월 1일에만 리밸런싱 실행
+    is_rebalancing_day = (datetime.now().day == 1)
     
     msg = f"📅 [{today_str}] 자산 배분 봇 리포트\n\n"
     
@@ -96,17 +104,17 @@ def run_bot():
         
         # 2) 한국 티커로 변환 및 매수 수량 계산
         # 현재 총 자산 가치 (현금 + 보유주식 평가액)
-        total_value = portfolio['cash']
+        total_value = float(portfolio['cash']) # float 변환
         for krx_code, qty in portfolio['holdings'].items():
             price = krx_utils.get_krx_price(krx_code)
             if price:
-                total_value += price * qty
+                total_value += float(price) * int(qty)
                 
         msg += f"💰 총 자산: {total_value:,.0f}원\n\n"
         msg += "[매매 목표]\n"
         
         new_holdings = {}
-        used_cash = 0
+        used_cash = 0.0
         
         for us_ticker, weight in target_weights.items():
             if weight <= 0: continue
@@ -121,8 +129,10 @@ def run_bot():
             price = krx_utils.get_krx_price(krx_code)
             
             if price:
+                # [수정] JSON 저장을 위해 int(), float() 명시적 변환
                 qty = int(target_amount / price)
-                amount = qty * price
+                amount = float(qty * price)
+                
                 if qty > 0:
                     msg += f"- {krx_name}: {qty}주 ({amount:,.0f}원)\n"
                     new_holdings[krx_code] = qty
@@ -132,7 +142,7 @@ def run_bot():
         
         # 포트폴리오 업데이트 (가상 체결)
         portfolio['holdings'] = new_holdings
-        portfolio['cash'] = total_value - used_cash
+        portfolio['cash'] = float(total_value - used_cash) # float 변환
         portfolio['last_rebal_date'] = today_str
         save_portfolio(portfolio)
         
@@ -143,15 +153,15 @@ def run_bot():
         # 2. 데일리 리포트
         msg += "📊 **데일리 포트폴리오 현황**\n\n"
         
-        total_eval = portfolio['cash']
-        invest_eval = 0
+        total_eval = float(portfolio['cash'])
+        invest_eval = 0.0
         
         for krx_code, qty in portfolio['holdings'].items():
             price = krx_utils.get_krx_price(krx_code)
             krx_name = config.KRX_NAME_MAP.get(krx_code, krx_code)
             
             if price:
-                val = price * qty
+                val = float(price) * int(qty)
                 invest_eval += val
                 msg += f"- {krx_name}: {qty}주 ({val:,.0f}원)\n"
             else:

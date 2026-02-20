@@ -10,12 +10,12 @@
 STRATEGY_TYPE = 'GROWTH'
 
 # 2. 초기 투자금 (KRW)
-INITIAL_CAPITAL_KRW = 10000000  # 1,000만 원
+INITIAL_CAPITAL_KRW = 1000000  # 1,000만 원
 
 # 3. 텔레그램 설정 (GitHub Secrets에서 불러오도록 설계됨)
 # 로컬 테스트 시에는 여기에 직접 입력해도 되지만, GitHub에 올릴 땐 비워두세요.
-TELEGRAM_TOKEN = "8517291270:AAEhnyGI05vfE2PffSVR_luxzDXJDcPeTNw"
-TELEGRAM_CHAT_ID = "1842718628"
+TELEGRAM_TOKEN = ""
+TELEGRAM_CHAT_ID = ""
 
 # ==============================================================================
 # [티커 매핑] 미국 ETF -> 한국 상장 ETF (KRX)
