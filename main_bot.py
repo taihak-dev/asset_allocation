@@ -21,7 +21,6 @@ def load_portfolio():
     if os.path.exists(PORTFOLIO_FILE):
         try:
             with open(PORTFOLIO_FILE, 'r') as f:
-                # 파일이 비어있는지 확인
                 content = f.read().strip()
                 if not content:
                     return default_portfolio
@@ -37,13 +36,7 @@ def save_portfolio(portfolio):
         json.dump(portfolio, f, indent=4)
 
 def get_strategy_allocation():
-    """
-    현재 날짜 기준으로 전략적 자산 배분 비율 계산 (미국 티커 기준)
-    """
-    # 데이터 준비
     db_utils.init_db()
-    
-    # 필요한 티커들 (config.TICKER_MAP의 키)
     us_tickers = list(config.TICKER_MAP.keys())
     
     df_cache = {}
@@ -65,20 +58,15 @@ def get_strategy_allocation():
         fred_cache['DGS10'] = dgs10
     except: pass
     
-    # 전략 실행
     now = datetime.now()
     
     if config.STRATEGY_TYPE == 'GROWTH':
-        # P20 (80%) + LAA (20%)
         p20_alloc = protocol20_strategy(0.8, now, df_cache, fred_cache, vix_threshold=30.0)
         laa_alloc = laa_strategy(0.2, now, df_cache, fred_cache.get('UNRATE'), fred_cache.get('DGS10'), use_smart_bond=True)
     else:
-        # BALANCED: BAA (40%) + LAA (60%) - BAA 로직은 P20 함수 재사용하되 VIX Gate 끔(혹은 높게)
-        # 여기서는 편의상 P20 함수를 쓰되 비중을 조절
-        p20_alloc = protocol20_strategy(0.4, now, df_cache, fred_cache, vix_threshold=999.0) # VIX 무시
+        p20_alloc = protocol20_strategy(0.4, now, df_cache, fred_cache, vix_threshold=999.0)
         laa_alloc = laa_strategy(0.6, now, df_cache, fred_cache.get('UNRATE'), fred_cache.get('DGS10'), use_smart_bond=True)
         
-    # 합산
     final_alloc = {}
     for alloc in [p20_alloc, laa_alloc]:
         for ticker, weight in alloc.items():
@@ -90,7 +78,6 @@ def run_bot():
     portfolio = load_portfolio()
     today_str = datetime.now().strftime('%Y-%m-%d')
     
-    # [원상복구] 매월 1일에만 리밸런싱 실행
     is_rebalancing_day = (datetime.now().day == 1)
     
     msg = f"📅 [{today_str}] 자산 배분 봇 리포트\n\n"
@@ -99,12 +86,9 @@ def run_bot():
         msg += "🔔 **리밸런싱 알림** 🔔\n"
         msg += f"전략: {config.STRATEGY_TYPE}\n\n"
         
-        # 1) 목표 비중 계산
         target_weights = get_strategy_allocation()
         
-        # 2) 한국 티커로 변환 및 매수 수량 계산
-        # 현재 총 자산 가치 (현금 + 보유주식 평가액)
-        total_value = float(portfolio['cash']) # float 변환
+        total_value = float(portfolio['cash'])
         for krx_code, qty in portfolio['holdings'].items():
             price = krx_utils.get_krx_price(krx_code)
             if price:
@@ -129,7 +113,6 @@ def run_bot():
             price = krx_utils.get_krx_price(krx_code)
             
             if price:
-                # [수정] JSON 저장을 위해 int(), float() 명시적 변환
                 qty = int(target_amount / price)
                 amount = float(qty * price)
                 
@@ -140,9 +123,8 @@ def run_bot():
             else:
                 msg += f"⚠️ {krx_name}: 현재가 조회 실패\n"
         
-        # 포트폴리오 업데이트 (가상 체결)
         portfolio['holdings'] = new_holdings
-        portfolio['cash'] = float(total_value - used_cash) # float 변환
+        portfolio['cash'] = float(total_value - used_cash)
         portfolio['last_rebal_date'] = today_str
         save_portfolio(portfolio)
         
@@ -174,7 +156,10 @@ def run_bot():
         msg += f"\n💰 총 자산: {total_asset:,.0f}원"
         msg += f"\n📈 수익: {profit:,.0f}원 ({profit_rate:.2f}%)"
         
-    # 텔레그램 발송
+        # [수정] 파일이 없으면 생성 (GitHub Actions 오류 방지)
+        if not os.path.exists(PORTFOLIO_FILE):
+            save_portfolio(portfolio)
+
     telegram_utils.send_message(msg)
 
 if __name__ == '__main__':
