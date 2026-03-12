@@ -16,7 +16,13 @@ def load_portfolio():
     """
     포트폴리오 파일 로드 (파일이 없거나 깨졌으면 초기화)
     """
-    default_portfolio = {'cash': config.INITIAL_CAPITAL_KRW, 'holdings': {}, 'last_rebal_date': ''}
+    # [수정] avg_prices 필드 추가
+    default_portfolio = {
+        'cash': config.INITIAL_CAPITAL_KRW, 
+        'holdings': {}, 
+        'last_rebal_date': '',
+        'avg_prices': {} 
+    }
     
     if os.path.exists(PORTFOLIO_FILE):
         try:
@@ -36,6 +42,9 @@ def save_portfolio(portfolio):
         json.dump(portfolio, f, indent=4)
 
 def get_strategy_allocation():
+    """
+    현재 날짜 기준으로 전략적 자산 배분 비율 계산 (미국 티커 기준)
+    """
     db_utils.init_db()
     us_tickers = list(config.TICKER_MAP.keys())
     
@@ -64,7 +73,7 @@ def get_strategy_allocation():
         p20_alloc = protocol20_strategy(0.8, now, df_cache, fred_cache, vix_threshold=30.0)
         laa_alloc = laa_strategy(0.2, now, df_cache, fred_cache.get('UNRATE'), fred_cache.get('DGS10'), use_smart_bond=True)
     else:
-        p20_alloc = protocol20_strategy(0.4, now, df_cache, fred_cache, vix_threshold=999.0)
+        p20_alloc = protocol20_strategy(0.4, now, df_cache, fred_cache, vix_threshold=999.0) 
         laa_alloc = laa_strategy(0.6, now, df_cache, fred_cache.get('UNRATE'), fred_cache.get('DGS10'), use_smart_bond=True)
         
     final_alloc = {}
@@ -78,6 +87,7 @@ def run_bot():
     portfolio = load_portfolio()
     today_str = datetime.now().strftime('%Y-%m-%d')
     
+    # 매월 1일에만 리밸런싱 실행
     is_rebalancing_day = (datetime.now().day == 1)
     
     msg = f"📅 [{today_str}] 자산 배분 봇 리포트\n\n"
@@ -88,16 +98,18 @@ def run_bot():
         
         target_weights = get_strategy_allocation()
         
-        total_value = float(portfolio['cash'])
+        # 현재 총 자산 가치 재계산 (최신가 반영)
+        total_eval_value = float(portfolio['cash'])
         for krx_code, qty in portfolio['holdings'].items():
             price = krx_utils.get_krx_price(krx_code)
             if price:
-                total_value += float(price) * int(qty)
-                
-        msg += f"💰 총 자산: {total_value:,.0f}원\n\n"
+                total_eval_value += float(price) * int(qty)
+        
+        msg += f"💰 총 자산(평가액): {total_eval_value:,.0f}원\n\n"
         msg += "[매매 목표]\n"
         
         new_holdings = {}
+        new_avg_prices = {} # 리밸런싱 직후엔 평단가를 전일 종가로 가정 (실제 매수 후 수정 필요)
         used_cash = 0.0
         
         for us_ticker, weight in target_weights.items():
@@ -105,11 +117,11 @@ def run_bot():
             
             krx_code = config.TICKER_MAP.get(us_ticker)
             if not krx_code:
-                msg += f"⚠️ {us_ticker}: 매핑된 한국 종목 없음 (건너뜀)\n"
+                msg += f"⚠️ {us_ticker}: 매핑된 한국 종목 없음\n"
                 continue
                 
             krx_name = config.KRX_NAME_MAP.get(krx_code, krx_code)
-            target_amount = total_value * weight
+            target_amount = total_eval_value * weight
             price = krx_utils.get_krx_price(krx_code)
             
             if price:
@@ -119,47 +131,70 @@ def run_bot():
                 if qty > 0:
                     msg += f"- {krx_name}: {qty}주 ({amount:,.0f}원)\n"
                     new_holdings[krx_code] = qty
+                    new_avg_prices[krx_code] = float(price) # 임시 평단가
                     used_cash += amount
             else:
                 msg += f"⚠️ {krx_name}: 현재가 조회 실패\n"
         
         portfolio['holdings'] = new_holdings
-        portfolio['cash'] = float(total_value - used_cash)
+        portfolio['avg_prices'] = new_avg_prices # 평단가 초기화
+        portfolio['cash'] = float(total_eval_value - used_cash)
         portfolio['last_rebal_date'] = today_str
         save_portfolio(portfolio)
         
         msg += f"\n잔여 현금: {portfolio['cash']:,.0f}원\n"
-        msg += "👉 위 수량대로 MTS에서 매매하세요!"
+        msg += "👉 MTS 매매 후, 실제 체결가로 portfolio.json을 수정해주세요!"
         
     else:
-        # 2. 데일리 리포트
-        msg += "📊 **데일리 포트폴리오 현황**\n\n"
+        # 2. 데일리 리포트 (수익률 포함)
+        msg += "📊 **데일리 포트폴리오 현황**\n"
         
-        total_eval = float(portfolio['cash'])
+        cash = float(portfolio['cash'])
         invest_eval = 0.0
+        total_profit = 0.0
+        
+        avg_prices = portfolio.get('avg_prices', {})
         
         for krx_code, qty in portfolio['holdings'].items():
+            qty = int(qty)
             price = krx_utils.get_krx_price(krx_code)
             krx_name = config.KRX_NAME_MAP.get(krx_code, krx_code)
             
             if price:
-                val = float(price) * int(qty)
+                price = float(price)
+                val = price * qty
                 invest_eval += val
-                msg += f"- {krx_name}: {qty}주 ({val:,.0f}원)\n"
+                
+                # 수익률 계산
+                avg_price = float(avg_prices.get(krx_code, 0))
+                if avg_price > 0:
+                    profit = (price - avg_price) * qty
+                    profit_pct = ((price - avg_price) / avg_price) * 100
+                    total_profit += profit
+                    emoji = "🔴" if profit > 0 else "🔵"
+                    msg += f"- {krx_name}: {qty}주 | {profit_pct:+.2f}% ({profit:+,.0f}원) {emoji}\n"
+                else:
+                    msg += f"- {krx_name}: {qty}주 ({val:,.0f}원)\n"
             else:
                 msg += f"- {krx_name}: 가격 조회 실패\n"
                 
-        total_asset = total_eval + invest_eval
-        profit = total_asset - config.INITIAL_CAPITAL_KRW
-        profit_rate = (profit / config.INITIAL_CAPITAL_KRW) * 100
+        total_asset = cash + invest_eval
+        # 총 수익 = (현재 총자산) - (초기 투자금) -> (X)
+        # 총 수익 = (평가손익 합계) -> (O) 이미 실현손익이 cash에 반영되어 있으므로 애매함.
+        # 가장 정확한 건: (현재 총자산) - (입금 총액). 입금액 관리가 안되므로
+        # 여기서는 '이번 리밸런싱 이후의 평가 손익'을 보여주는게 나음.
+        # 또는 단순히 (현재 총자산)을 보여주고 전일 대비 등을 보여주는게 좋음.
         
-        msg += f"\n💰 총 자산: {total_asset:,.0f}원"
-        msg += f"\n📈 수익: {profit:,.0f}원 ({profit_rate:.2f}%)"
+        # 여기서는 config.INITIAL_CAPITAL_KRW 대비 수익률로 표시 (원금 불변 가정)
+        total_profit_real = total_asset - config.INITIAL_CAPITAL_KRW
+        total_profit_pct = (total_profit_real / config.INITIAL_CAPITAL_KRW) * 100
         
-        # [수정] 파일이 없으면 생성 (GitHub Actions 오류 방지)
-        if not os.path.exists(PORTFOLIO_FILE):
-            save_portfolio(portfolio)
-
+        msg += "\n"
+        msg += f"💰 총 자산: {total_asset:,.0f}원\n"
+        msg += f"💵 현금: {cash:,.0f}원\n"
+        msg += f"📈 총 수익: {total_profit_real:+,.0f}원 ({total_profit_pct:+.2f}%)"
+        
+    # 텔레그램 발송
     telegram_utils.send_message(msg)
 
 if __name__ == '__main__':
