@@ -17,7 +17,8 @@ def load_portfolio():
         'cash': config.INITIAL_CAPITAL_KRW, 
         'holdings': {}, 
         'last_rebal_date': '',
-        'avg_prices': {} 
+        'avg_prices': {},
+        'realized_profit': 0.0 # [추가] 누적 실현 수익
     }
     
     if os.path.exists(PORTFOLIO_FILE):
@@ -26,7 +27,11 @@ def load_portfolio():
                 content = f.read().strip()
                 if not content:
                     return default_portfolio
-                return json.loads(content)
+                pf = json.loads(content)
+                # 하위 호환성을 위해 키가 없으면 추가
+                if 'realized_profit' not in pf:
+                    pf['realized_profit'] = 0.0
+                return pf
         except (json.JSONDecodeError, Exception) as e:
             print(f"[WARN] Failed to load portfolio ({e}). Initializing new portfolio.")
             return default_portfolio
@@ -88,7 +93,6 @@ def run_bot():
         msg += "🔔 **리밸런싱 알림** 🔔\n"
         msg += f"전략: {config.STRATEGY_TYPE}\n\n"
         
-        # 1. 현재 포트폴리오 평가
         current_holdings = portfolio.get('holdings', {})
         total_eval_value = float(portfolio['cash'])
         for krx_code, qty in current_holdings.items():
@@ -98,9 +102,8 @@ def run_bot():
         
         msg += f"💰 총 자산(평가액): {total_eval_value:,.0f}원\n\n"
         
-        # 2. 목표 포트폴리오 계산
         target_weights = get_strategy_allocation()
-        target_holdings = {} # {krx_code: qty}
+        target_holdings = {} 
         
         for us_ticker, weight in target_weights.items():
             if weight <= 0: continue
@@ -114,7 +117,6 @@ def run_bot():
                 if qty > 0:
                     target_holdings[krx_code] = target_holdings.get(krx_code, 0) + qty
 
-        # 3. 매매 지시 생성 (기존 vs 목표)
         all_codes = set(current_holdings.keys()) | set(target_holdings.keys())
         
         trades_sell = []
@@ -133,7 +135,6 @@ def run_bot():
             elif target_qty > 0:
                 trades_hold.append(f"- {name}: {target_qty}주 보유")
 
-        # 4. 메시지 조합
         if trades_sell:
             msg += "[🔴 매도 목록]\n" + "\n".join(trades_sell) + "\n\n"
         if trades_buy:
@@ -141,19 +142,18 @@ def run_bot():
         if trades_hold:
             msg += "[⚪️ 보유 목록]\n" + "\n".join(trades_hold) + "\n\n"
             
-        msg += "👉 위 지시대로 매매 후, 실제 체결가로 portfolio.json을 수정해주세요!"
-        
-        # 포트폴리오 파일은 실제 매매 후 수동 업데이트하므로 봇이 수정하지 않음.
+        msg += "👉 위 지시대로 매매 후, 실제 체결가와 실현수익을 portfolio.json에 업데이트 해주세요!"
         
     else:
-        # 데일리 리포트 (기존과 동일)
+        # 데일리 리포트 (수익률 표시 개선)
         msg += "📊 **데일리 포트폴리오 현황**\n"
         
         cash = float(portfolio['cash'])
         invest_eval = 0.0
-        total_profit = 0.0
+        unrealized_profit = 0.0 # 평가 손익
         
         avg_prices = portfolio.get('avg_prices', {})
+        realized_profit = float(portfolio.get('realized_profit', 0.0)) # 실현 손익
         
         for krx_code, qty in portfolio['holdings'].items():
             qty = int(qty)
@@ -169,7 +169,7 @@ def run_bot():
                 if avg_price > 0:
                     profit = (price - avg_price) * qty
                     profit_pct = ((price - avg_price) / avg_price) * 100
-                    total_profit += profit
+                    unrealized_profit += profit
                     emoji = "🔴" if profit > 0 else "🔵"
                     msg += f"- {krx_name}: {qty}주 | {profit_pct:+.2f}% ({profit:+,.0f}원) {emoji}\n"
                 else:
@@ -178,13 +178,19 @@ def run_bot():
                 msg += f"- {krx_name}: 가격 조회 실패\n"
                 
         total_asset = cash + invest_eval
-        total_profit_real = total_asset - config.INITIAL_CAPITAL_KRW
-        total_profit_pct = (total_profit_real / config.INITIAL_CAPITAL_KRW) * 100
+        total_profit = realized_profit + unrealized_profit
+        total_profit_pct = (total_profit / config.INITIAL_CAPITAL_KRW) * 100
         
         msg += "\n"
         msg += f"💰 총 자산: {total_asset:,.0f}원\n"
-        msg += f"💵 현금: {cash:,.0f}원\n"
-        msg += f"📈 총 수익: {total_profit_real:+,.0f}원 ({total_profit_pct:+.2f}%)"
+        msg += f"💵 현금 잔고: {cash:,.0f}원\n\n"
+        
+        msg += f"✔️ 누적 실현수익: {realized_profit:+,.0f}원\n"
+        msg += f"✔️ 현재 평가손익: {unrealized_profit:+,.0f}원\n"
+        msg += f"📈 총 합계 수익: {total_profit:+,.0f}원 ({total_profit_pct:+.2f}%)"
+        
+        if not os.path.exists(PORTFOLIO_FILE):
+            save_portfolio(portfolio)
         
     telegram_utils.send_message(msg)
 
